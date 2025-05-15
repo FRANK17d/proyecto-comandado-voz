@@ -4,13 +4,8 @@ import subprocess              # Para ejecutar comandos del sistema
 import platform                # Para obtener información del sistema operativo
 import webbrowser              # Para abrir navegadores web
 import datetime                # Para manejar fechas y horas
-import threading               # Para ejecutar tareas en paralelo
 import time                    # Para funciones relacionadas con tiempo
 import json                    # Para leer/guardar configuraciones
-import queue                   # Para comunicación entre hilos
-import tempfile                # Para crear archivos temporales
-import wave                    # Para manejar archivos de audio
-import numpy as np             # Para cálculos numéricos
 import sys                     # Para acceder a variables del sistema
 
 # Importación de componentes PyQt5 para la interfaz gráfica
@@ -28,8 +23,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,               # Diálogos para seleccionar archivos
     QMessageBox,               # Ventanas de mensaje
     QFrame,                    # Marcos para agrupar elementos
-    QSplitter,                 # Divisor que permite redimensionar paneles
-    QScrollArea                # Áreas con desplazamiento
+    QSplitter                 # Divisor que permite redimensionar paneles                # Áreas con desplazamiento
 )
 
 # Importación de componentes PyQt5 para señales, temporizadores y hilos
@@ -44,9 +38,7 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import (
     QFont,                     # Fuentes
     QColor,                    # Colores
-    QTextCursor,               # Cursor para manipular texto
-    QIcon,                     # Iconos
-    QPalette                   # Paletas de colores
+    QTextCursor               # Cursor para manipular texto                   # Paletas de colores
 )
 
 # Biblioteca para reconocimiento de voz
