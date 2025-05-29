@@ -1,0 +1,186 @@
+# Asistente de Voz con Interfaz Gráfica (PyQt5)
+
+Este proyecto implementa un Asistente de Voz con una interfaz gráfica de usuario (GUI) desarrollada en PyQt5. Permite al usuario interactuar con el sistema operativo mediante comandos de voz o texto para realizar diversas tareas.
+
+## Funcionalidades Principales
+
+* **Reconocimiento de Voz**: Convierte la voz del usuario en comandos de texto utilizando la biblioteca `speech_recognition`.
+* **Ejecución de Comandos de Terminal**: Ejecuta comandos del shell del sistema operativo.
+* **Gestión de Archivos y Directorios**:
+    * Lista el contenido de directorios.
+    * Crea nuevas carpetas y archivos.
+    * Elimina archivos (con confirmación).
+    * Muestra el directorio actual y permite cambiar el directorio de trabajo.
+    * Establece una ruta de trabajo persistente para la aplicación.
+* **Información del Sistema**:
+    * Muestra detalles del sistema operativo (nombre, versión, arquitectura).
+    * Proporciona la hora y fecha actual.
+    * Muestra el uso de memoria RAM.
+    * Muestra el espacio disponible en disco.
+    * Lista los procesos en ejecución.
+    * Muestra las conexiones de red activas.
+* **Interacción Web**:
+    * Abre el navegador web predeterminado.
+    * Realiza búsquedas en Google con el término especificado.
+* **Control del Sistema**:
+    * Permite programar el apagado del sistema (con confirmación y opción de cancelar).
+* **Interfaz Gráfica (GUI con PyQt5)**:
+    * **Consola de Salida**: Muestra de forma interactiva los comandos ingresados, las respuestas del asistente y mensajes de estado o error. Utiliza formato con colores y emojis para facilitar la lectura.
+    * **Entrada de Comandos por Texto**: Un campo de texto para ingresar comandos manualmente, con historial navegable mediante las teclas de flecha arriba/abajo.
+    * **Control de Voz**:
+        * Botón para iniciar y detener la escucha del micrófono.
+        * Barra de progreso que simula el nivel de audio del micrófono.
+        * Control deslizante (slider) para ajustar la sensibilidad del reconocimiento de voz.
+    * **Gestión de Ruta de Trabajo**: Visualización de la ruta de trabajo actual y botones para cambiarla o usar el directorio actual.
+    * **Lista de Comandos Disponibles**: Un área de texto de solo lectura que enumera los comandos que el asistente puede entender.
+    * **Temas Visuales**: Opción para cambiar entre un tema claro y un tema "negro y blanco" (estilo terminal).
+* **Multihilo**:
+    * El reconocimiento de voz y la simulación del nivel de audio se ejecutan en hilos (`QThread`) separados para mantener la responsividad de la interfaz gráfica.
+* **Configuración Persistente**:
+    * Guarda la ruta de trabajo preferida y el tema visual seleccionado en un archivo de configuración JSON (`~/.asistente_voz_qt_config.json`) para que persistan entre sesiones.
+* **Manejo de Errores**:
+    * Incorpora manejo de excepciones para operaciones críticas como el reconocimiento de voz y la ejecución de comandos.
+    * Incluye un manejador de excepciones global para capturar y mostrar errores no esperados en la aplicación.
+
+## Estructura del Código
+
+El código está organizado modularmente en las siguientes clases principales:
+
+### `AudioLevelThread(QThread)`
+* **Propósito**: Simula el nivel de entrada de audio del micrófono para la barra de progreso en la GUI.
+* **Funcionamiento**: Genera valores numéricos aleatorios periódicamente y los emite a través de la señal `level_updated(float)`.
+* **Optimización**: Intenta usar `numpy` para la generación de números aleatorios si está instalado; de lo contrario, utiliza el módulo `random` estándar.
+* **Control**: Puede ser iniciado (`start()`) y detenido (`stop()`) de forma segura.
+
+### `SpeechRecognitionThread(QThread)`
+* **Propósito**: Gestiona todo el proceso de reconocimiento de voz en un hilo separado para no bloquear la GUI.
+* **Componentes**: Utiliza `speech_recognition.Recognizer` y `speech_recognition.Microphone`.
+* **Señales Emitidas**:
+    * `command_recognized(str)`: Cuando se ha reconocido un comando de voz.
+    * `status_message(str)`: Para enviar mensajes de estado (ej. "Escuchando...", "Procesando...", errores de reconocimiento) a la GUI.
+* **Características**:
+    * Permite ajustar el umbral de energía (`energy_threshold`) para la sensibilidad del micrófono.
+    * Utiliza ajuste dinámico de energía para adaptarse al ruido ambiente.
+    * El procesamiento de comandos puede ser pausado (`pause()`) y reanudado (`resume()`).
+    * Maneja errores comunes de la API de reconocimiento (timeout, valor desconocido, error de solicitud).
+    * Intenta precargar la lista de micrófonos para optimizar el rendimiento.
+
+### `ConsoleTextEdit(QTextEdit)`
+* **Propósito**: Un widget de texto personalizado para mostrar la salida de la consola del asistente.
+* **Características**:
+    * **Formato de Mensajes**: Aplica colores y emojis a los mensajes según su tipo (comando, respuesta, error, sistema) y el tema visual activo en la aplicación.
+    * **Buffering**: Utiliza un buffer interno y un `QTimer` para actualizar el contenido en lotes, lo que mejora el rendimiento al mostrar múltiples mensajes rápidamente.
+    * **Límite de Líneas**: Restringe el número máximo de líneas mostradas para evitar un consumo excesivo de memoria.
+    * **Dependencia del Tema**: Requiere una referencia a la ventana principal (`AsistenteVozQT`) para acceder y aplicar el tema visual actual.
+    * **Solo Lectura**: Configurado como de solo lectura.
+
+### `AsistenteVozQT(QMainWindow)`
+Esta es la clase principal de la aplicación, que hereda de `QMainWindow` y orquesta toda la funcionalidad.
+
+* **`__init__(self)`**:
+    * Inicializa variables de estado (sistema operativo, estado de escucha, prefijo para comandos de terminal, historial de comandos, ruta de trabajo inicial).
+    * Llama a `cargar_configuracion()` para restaurar preferencias guardadas.
+    * Invoca `setup_ui()` para construir la interfaz gráfica y `setup_threads()` para inicializar los hilos de trabajo.
+    * Muestra mensajes de bienvenida en la consola.
+* **`setup_ui(self)`**:
+    * Configura la ventana principal (título, tamaño mínimo).
+    * Crea y organiza todos los widgets de la GUI (paneles, botones, etiquetas, campos de texto, menús, etc.) utilizando layouts de PyQt5 (`QVBoxLayout`, `QHBoxLayout`, `QSplitter`).
+    * Establece las conexiones entre las señales de los widgets (ej. clic de un botón) y los slots (métodos manejadores) correspondientes.
+    * Aplica el tema visual cargado o el predeterminado.
+* **`setup_threads(self)`**:
+    * Crea las instancias de `AudioLevelThread` y `SpeechRecognitionThread`.
+    * Conecta las señales emitidas por estos hilos a los slots apropiados en `AsistenteVozQT` para actualizar la GUI o procesar datos (ej. `audio_thread.level_updated` se conecta a `self.update_audio_level`).
+* **Gestión de Temas (`toggle_theme`, `apply_theme`)**:
+    * Permiten al usuario cambiar entre un tema "claro" y un tema "negro y blanco".
+    * `apply_theme` aplica dinámicamente hojas de estilo Qt (QSS) a los diferentes widgets para modificar su apariencia.
+* **`update_mic_button_style(self)`**: Modifica el estilo visual del botón del micrófono para reflejar si está activo (escuchando) o inactivo, adaptándose también al tema actual.
+* **`eventFilter(self, source, event)`**: Captura eventos de teclado (flecha arriba/abajo) en el campo de entrada de comandos (`QLineEdit`) para permitir la navegación a través del historial de comandos ingresados.
+* **Slots (Métodos decorados con `@pyqtSlot`)**:
+    * `update_audio_level(self, level)`: Actualiza la `QProgressBar` que muestra el nivel de audio.
+    * `on_command_recognized(self, command)`: Se activa cuando `SpeechRecognitionThread` emite un comando reconocido. Añade el comando a la consola y al historial, pausa temporalmente el reconocimiento de voz y llama a `procesar_comando_seguro`.
+    * `on_status_message(self, message)`: Actualiza la barra de estado de la aplicación con mensajes provenientes del hilo de reconocimiento.
+* **Navegación de Historial (`navegar_historial_arriba`, `navegar_historial_abajo`)**: Permiten al usuario moverse por los comandos previamente ingresados en el `QLineEdit`.
+* **Configuración Persistente (`cargar_configuracion`, `guardar_configuracion`)**:
+    * Leen y escriben la configuración de la aplicación (ruta de trabajo y tema) en un archivo JSON ubicado en el directorio home del usuario (`~/.asistente_voz_qt_config.json`).
+* **Control de Voz y Sensibilidad**:
+    * `update_sensitivity(self, value)`: Ajusta el `energy_threshold` del `SpeechRecognitionThread` según el valor del `QSlider`.
+    * `toggle_escucha(self)`, `iniciar_escucha(self)`, `detener_escucha(self)`: Gestionan el estado de escucha, iniciando o deteniendo los hilos de audio y reconocimiento según sea necesario.
+* **Gestión de Ruta de Trabajo**:
+    * `cambiar_ruta_dialogo(self)`: Abre un `QFileDialog` para que el usuario seleccione una nueva ruta de trabajo.
+    * `usar_ruta_actual(self)`: Establece la ruta de trabajo de la aplicación al directorio actual del sistema.
+    * `cambiar_ruta_trabajo(self, nueva_ruta)`: Actualiza la ruta de trabajo interna, la GUI y guarda la configuración.
+* **Procesamiento y Ejecución de Comandos**:
+    * `ejecutar_comando_escrito(self)`: Obtiene el texto del `QLineEdit`, lo añade al historial y lo pasa a `procesar_comando_seguro`.
+    * `procesar_comando_seguro(self, comando)`: Es un envoltorio para `procesar_comando` que incluye manejo de excepciones y asegura que el hilo de reconocimiento se reanude después del procesamiento.
+    * `agregar_mensaje(self, mensaje, tipo="normal")`: Envía un mensaje formateado a la `ConsoleTextEdit`.
+    * `ejecutar_comando_terminal(self, comando_str)`:
+        * Utiliza `subprocess.Popen` para ejecutar comandos en la terminal del sistema operativo.
+        * Opera dentro de la `self.ruta_trabajo` actual.
+        * Captura la salida estándar (`stdout`) y el error estándar (`stderr`).
+        * Implementa un timeout para evitar que comandos de larga duración bloqueen indefinidamente.
+        * En Windows, utiliza `creationflags=subprocess.CREATE_NO_WINDOW` para evitar que se abra una ventana de consola.
+    * `procesar_comando(self, texto)`:
+        * Este es el núcleo de la lógica del asistente. Contiene una serie de bloques `if/elif` que analizan el `texto` del comando (proveniente de voz o teclado).
+        * Identifica palabras clave y frases para determinar la acción a realizar (ej. "salir", "listar", "crear carpeta", "ejecutar ...", "buscar ...", etc.).
+        * Para acciones que requieren confirmación (ej. "eliminar archivo", "apagar sistema"), llama a los métodos `confirmar_eliminacion` o `confirmar_apagado`.
+* **Diálogos de Confirmación (`confirmar_eliminacion`, `confirmar_apagado`)**:
+    * Utilizan `QMessageBox.question` para mostrar un diálogo al usuario, solicitando confirmación antes de realizar operaciones potencialmente destructivas o críticas.
+* **`closeEvent(self, event)`**:
+    * Se ejecuta automáticamente cuando el usuario intenta cerrar la ventana.
+    * Llama a `guardar_configuracion()` para persistir el estado actual.
+    * Detiene de forma segura los hilos `audio_thread` y `speech_thread`.
+    * Detiene el `buffer_timer` de la consola.
+
+### `main()` (Función Global)
+* **Punto de Entrada**: Es la función que se ejecuta cuando se inicia el script.
+* **Conciencia de DPI (Windows)**: Intenta configurar la aplicación para que sea consciente de los DPI en Windows, mejorando la visualización en pantallas de alta resolución.
+* **Inicialización de `QApplication`**: Crea la instancia de la aplicación PyQt.
+* **Manejador Global de Excepciones**:
+    * `sys.excepthook` se configura con una función `handle_exception` personalizada.
+    * Esta función captura cualquier excepción no controlada que ocurra durante la ejecución de la aplicación, la imprime en la consola y la muestra al usuario en un `QMessageBox` detallado, lo que facilita la depuración.
+* **Creación y Ejecución de la Ventana Principal**:
+    * Crea una instancia de `AsistenteVozQT`.
+    * Muestra la ventana (`window.show()`).
+    * Inicia el bucle de eventos principal de la aplicación (`app.exec_()`).
+* **Manejo de Errores de Inicialización**: Envuelve la creación de la ventana en un bloque `try-except` para capturar y mostrar errores críticos que puedan ocurrir durante el arranque.
+
+## Bibliotecas Externas Necesarias
+
+* **PyQt5**: Para la creación de la interfaz gráfica de usuario.
+* **SpeechRecognition**: Para la funcionalidad de reconocimiento de voz.
+    * **PyAudio** (dependencia de SpeechRecognition): Necesaria para acceder al hardware del micrófono.
+* **NumPy (Opcional)**: Utilizada por `AudioLevelThread` si está disponible para generar números aleatorios. Si no se encuentra, se utiliza el módulo `random` estándar de Python.
+
+## Instalación y Ejecución
+
+1.  **Clonar el repositorio (si aplica) o descargar los archivos.**
+2.  **Instalar las dependencias:**
+    ```bash
+    pip install PyQt5 SpeechRecognition PyAudio numpy
+    ```
+    *(Nota: PyAudio puede requerir pasos adicionales de instalación dependiendo del sistema operativo. Consultar la documentación de PyAudio.)*
+3.  **Ejecutar el script:**
+    Asegurarse de que el archivo principal se llame `voz.py` o `tempCodeRunnerFile.py` (según el contexto de los archivos proporcionados) o renombrarlo adecuadamente.
+    ```bash
+    python nombre_del_archivo.py
+    ```
+
+## Uso
+
+Al iniciar la aplicación, se presentará la interfaz gráfica.
+
+* **Para usar comandos de voz**:
+    1.  Hacer clic en el botón "Iniciar Escucha". El botón cambiará para indicar que está escuchando.
+    2.  Hablar claramente al micrófono.
+    3.  El comando reconocido aparecerá en la consola, y el asistente intentará ejecutarlo.
+    4.  Para detener la escucha, hacer clic en "Detener Escucha".
+    5.  Se puede ajustar la "Sensibilidad" con el slider si el reconocimiento no es óptimo.
+* **Para usar comandos de texto**:
+    1.  Escribir el comando en el campo de texto en la parte inferior del panel izquierdo.
+    2.  Presionar Enter o hacer clic en el botón "Enviar".
+    3.  El comando y su resultado (o error) se mostrarán en la consola.
+* **Cambiar Tema**: Hacer clic en el botón "Tema Claro" / "Tema Negro/Blanco" en la barra superior.
+* **Ruta de Trabajo**: Modificar la ruta donde se crearán archivos/carpetas usando los botones en el panel derecho.
+* **Consultar Comandos**: La lista de comandos básicos está visible en el panel derecho.
+
+Este asistente proporciona una forma flexible e interactiva de gestionar tareas del sistema a través de una combinación de entrada de voz y texto, con una interfaz de usuario clara y personalizable.
