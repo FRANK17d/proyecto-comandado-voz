@@ -7,6 +7,7 @@ import datetime             # Para manejar fechas y horas
 import time                 # Para funciones relacionadas con tiempo
 import json                 # Para leer/guardar configuraciones
 import sys                  # Para acceder a variables del sistema
+import pyttsx3              # Para síntesis de voz (TTS)
 
 # Importación de componentes PyQt5 para la interfaz gráfica
 from PyQt5.QtWidgets import (
@@ -43,6 +44,45 @@ from PyQt5.QtGui import (
 
 # Biblioteca para reconocimiento de voz
 import speech_recognition as sr
+
+
+# Clase para manejar la síntesis de voz (Text-to-Speech)
+class TextToSpeechManager:
+    """Clase para manejar la síntesis de voz"""
+    def __init__(self):
+        try:
+            self.engine = pyttsx3.init()
+            # Configurar propiedades de la voz
+            voices = self.engine.getProperty('voices')
+            # Intentar usar una voz en español si está disponible
+            spanish_voice = None
+            for voice in voices:
+                if 'spanish' in voice.id.lower() or 'español' in voice.id.lower() or 'spa' in voice.id.lower():
+                    spanish_voice = voice.id
+                    break
+            
+            # Si hay una voz en español disponible, usarla
+            if spanish_voice:
+                self.engine.setProperty('voice', spanish_voice)
+            
+            # Configurar velocidad de habla (valor predeterminado = 200)
+            self.engine.setProperty('rate', 170)
+            self.available = True
+        except Exception as e:
+            print(f"Error al inicializar motor de síntesis de voz: {e}")
+            self.available = False
+    
+    def speak(self, text):
+        """Convierte texto a voz"""
+        if self.available:
+            try:
+                self.engine.say(text)
+                self.engine.runAndWait()
+                return True
+            except Exception as e:
+                print(f"Error en síntesis de voz: {e}")
+                return False
+        return False
 
 
 # Clase que maneja la simulación del nivel de audio en un hilo separado
@@ -234,8 +274,8 @@ class ConsoleTextEdit(QTextEdit):
                                     self.parent_window.current_theme == "black_and_white")
 
         # Colores base (para tema claro o si no es B&W)
-        text_color = "#abb2bf" # Default for light theme console
-        prompt_color = "#61afef"
+        text_color = "#646566" # Default for light theme console
+        prompt_color = "#5d6972"
         command_text_color = "#98c379"
         respuesta_color = "#98c379"
         error_color = "#e06c75"
@@ -329,17 +369,25 @@ class AsistenteVozQT(QMainWindow):
         self.ruta_trabajo = os.path.expanduser("~") 
         self.cargar_configuracion()                 
         
+        # Inicializar el módulo Text-to-Speech
+        self.tts_manager = TextToSpeechManager()
+        self.tts_enabled = True  # Por defecto, activado
+        
         self.setup_ui()
         self.setup_threads()
         
-        self.agregar_mensaje("¡Bienvenido al Asistente de Voz!", "sistema")
+        self.agregar_mensaje("¡Bienvenido al terminal de windows 11!", "sistema")
         self.agregar_mensaje(f"Ruta de trabajo actual: {self.ruta_trabajo}", "sistema")
         self.agregar_mensaje("Escribe un comando o usa la voz.", "sistema")
+        
+        # Mensaje de bienvenida por voz
+        if self.tts_enabled and self.tts_manager.available:
+            self.tts_manager.speak("¡Bienvenido al terminal de Windows comandado por voz!")
             
     def setup_ui(self):
         """Configura todos los elementos de la interfaz gráfica"""
-        self.setWindowTitle("Asistente de Voz")
-        self.setMinimumSize(1000, 700)
+        self.setWindowTitle("Terminal de Windows 11")
+        self.setMinimumSize(1080, 720)
         
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -349,17 +397,22 @@ class AsistenteVozQT(QMainWindow):
         
         self.top_bar = QFrame()
         self.top_bar.setObjectName("top_bar") 
-        self.top_bar.setMaximumHeight(60)
+        self.top_bar.setMaximumHeight(85)
         
         self.top_layout = QHBoxLayout(self.top_bar)
         
-        self.title_label = QLabel("Asistente de Voz")
+        self.title_label = QLabel("Terminal comandado por voz")
         self.title_label.setObjectName("title_label")
         self.top_layout.addWidget(self.title_label)
         
         self.theme_button = QPushButton("Tema Claro") 
         self.theme_button.clicked.connect(self.toggle_theme)
         self.top_layout.addWidget(self.theme_button)
+        
+        # Añadir botón de TTS
+        self.tts_button = QPushButton("Voz: Activada" if self.tts_enabled else "Voz: Desactivada")
+        self.tts_button.clicked.connect(self.toggle_tts)
+        self.top_layout.addWidget(self.tts_button)
         
         self.main_layout.addWidget(self.top_bar)
         
@@ -482,6 +535,8 @@ class AsistenteVozQT(QMainWindow):
 • "uso de memoria" - Muestra uso de memoria RAM
 • "uso de disco" - Muestra espacio en disco
 • "conexiones de red" - Muestra conexiones activas
+• "activar voz" - Activa la síntesis de voz
+• "desactivar voz" - Desactiva la síntesis de voz
 • "salir" o "terminar" - Cierra la aplicación"""
         
         self.commands_list.setText(comandos_texto)
@@ -509,6 +564,18 @@ class AsistenteVozQT(QMainWindow):
         self.speech_thread.command_recognized.connect(self.on_command_recognized)
         self.speech_thread.status_message.connect(self.on_status_message)
     
+    def toggle_tts(self):
+        """Activa o desactiva la síntesis de voz"""
+        self.tts_enabled = not self.tts_enabled
+        self.tts_button.setText("Voz: Activada" if self.tts_enabled else "Voz: Desactivada")
+        mensaje = "Síntesis de voz activada" if self.tts_enabled else "Síntesis de voz desactivada"
+        self.agregar_mensaje(mensaje, "sistema")
+        
+        # Confirmación por voz si se activó
+        if self.tts_enabled and self.tts_manager.available:
+            # Aquí sí usamos el mensaje completo porque es relevante
+            self.tts_manager.speak(mensaje)
+    
     def toggle_theme(self):
         """Cambia entre tema claro y negro/blanco"""
         if self.current_theme == "light":
@@ -533,7 +600,7 @@ class AsistenteVozQT(QMainWindow):
                 }
                 QLabel#title_label { 
                     color: white; 
-                    font-size: 14pt; 
+                    font-size: 12pt; 
                     font-weight: bold;
                     padding: 5px;
                 }
@@ -791,9 +858,12 @@ class AsistenteVozQT(QMainWindow):
                         self.ruta_trabajo = config['ruta_trabajo']
                     # Cargar tema guardado, default a "black_and_white"
                     self.current_theme = config.get('theme', 'black_and_white') 
+                    # Cargar configuración de síntesis de voz, activada por defecto
+                    self.tts_enabled = config.get('tts_enabled', True)
         except Exception as e:
             print(f"Error al cargar configuración: {e}")
             self.current_theme = "black_and_white" # Default en caso de error
+            self.tts_enabled = True
 
     def guardar_configuracion(self):
         """Guarda la configuración actual"""
@@ -801,7 +871,8 @@ class AsistenteVozQT(QMainWindow):
         try:
             config = {
                 'ruta_trabajo': self.ruta_trabajo,
-                'theme': self.current_theme 
+                'theme': self.current_theme,
+                'tts_enabled': self.tts_enabled
             }
             with open(config_path, 'w') as f:
                 json.dump(config, f)
@@ -881,8 +952,51 @@ class AsistenteVozQT(QMainWindow):
             self.command_input.clear()
     
     def agregar_mensaje(self, mensaje, tipo="normal"):
-        """Agrega un mensaje a la consola"""
+        """Agrega un mensaje a la consola y lo habla si es apropiado"""
         self.consola.append_message(mensaje, tipo)
+        
+        # Hablar el mensaje si corresponde y la síntesis de voz está activada
+        if self.tts_enabled and self.tts_manager.available:
+            # Solo hablar respuestas y mensajes del sistema, no comandos ni errores
+            if tipo == "respuesta":
+                # Crear un mensaje más breve para la síntesis de voz
+                mensaje_voz = self.generar_respuesta_voz(mensaje)
+                self.tts_manager.speak(mensaje_voz)
+            elif tipo == "sistema" and len(mensaje) < 100:
+                self.tts_manager.speak(mensaje)
+                
+    def generar_respuesta_voz(self, mensaje):
+        """Genera una respuesta breve para la síntesis de voz"""
+        mensaje_original = mensaje.lower()
+        
+        # Respuestas para comandos específicos
+        if "directorio" in mensaje_original:
+            return "Directorio actualizado."
+        elif "archivo creado" in mensaje_original:
+            return "Archivo creado correctamente."
+        elif "archivo eliminado" in mensaje_original:
+            return "Archivo eliminado correctamente."
+        elif "carpeta creada" in mensaje_original:
+            return "Carpeta creada correctamente."
+        elif "son las" in mensaje_original:
+            # Para comandos de hora, mantener el mensaje original
+            return mensaje
+        elif "hoy es" in mensaje_original:
+            # Para comandos de fecha, mantener el mensaje original
+            return mensaje
+        elif "abriendo navegador" in mensaje_original:
+            return "Abriendo navegador web."
+        elif "buscando" in mensaje_original:
+            return "Búsqueda iniciada en Google."
+        
+        # Respuestas genéricas según el contenido del mensaje
+        elif len(mensaje) > 500:  # Mensaje muy largo
+            return "Comando ejecutado. La respuesta es extensa."
+        elif mensaje.strip().count("\n") > 5:  # Mensaje con muchas líneas
+            return "Comando ejecutado. Se muestran los resultados en pantalla."
+        else:
+            # Mensaje general para otros casos
+            return "Comando ejecutado correctamente."
     
     def ejecutar_comando_terminal(self, comando_str):
         """Ejecuta un comando en la terminal del sistema y devuelve (mensaje, tipo_mensaje)"""
@@ -901,12 +1015,12 @@ class AsistenteVozQT(QMainWindow):
                 
                 if proceso.returncode == 0:
                     if len(stdout) > 5000: 
-                        stdout = stdout[:5000] + "\n...(resultado truncado)..."
-                    return f"Resultado:\n{stdout}", "normal" 
+                        return "Comando ejecutado correctamente. La respuesta es muy extensa para mostrarla completa.", "respuesta"
+                    return stdout, "respuesta"  # Cambio de "normal" a "respuesta"
                 else:
                     if len(stderr) > 2000:
-                        stderr = stderr[:2000] + "\n...(error truncado)..."
-                    return f"Error (código {proceso.returncode}):\n{stderr}", "error"
+                        return "Error al ejecutar el comando. La salida de error es muy extensa.", "error"
+                    return stderr, "error"
             except subprocess.TimeoutExpired:
                 proceso.kill()
                 proceso.communicate() 
@@ -1120,9 +1234,31 @@ class AsistenteVozQT(QMainWindow):
                 
         # Mostrar conexiones de red
         elif "conexiones de red" in texto or "mostrar conexiones" in texto:
-            comando_net = "netstat -an" if self.sistema_operativo == "Windows" else "netstat -tulnp"
-            resultado, tipo_resultado = self.ejecutar_comando_terminal(comando_net)
+            comando_red = "netstat -an" if self.sistema_operativo == "Windows" else "netstat -tup"
+            resultado, tipo_resultado = self.ejecutar_comando_terminal(comando_red)
             self.agregar_mensaje(resultado, tipo_resultado)
+            return
+            
+        # Activar síntesis de voz
+        elif "activar voz" in texto or "habilitar voz" in texto or "con voz" in texto:
+            if not self.tts_enabled:
+                self.tts_enabled = True
+                self.tts_button.setText("Voz: Activada")
+                self.agregar_mensaje("Síntesis de voz activada", "respuesta")
+                if self.tts_manager.available:
+                    self.tts_manager.speak("Síntesis de voz activada")
+            else:
+                self.agregar_mensaje("La síntesis de voz ya está activada", "respuesta")
+            return
+            
+        # Desactivar síntesis de voz
+        elif "desactivar voz" in texto or "deshabilitar voz" in texto or "sin voz" in texto:
+            if self.tts_enabled:
+                self.tts_enabled = False
+                self.tts_button.setText("Voz: Desactivada")
+                self.agregar_mensaje("Síntesis de voz desactivada", "respuesta")
+            else:
+                self.agregar_mensaje("La síntesis de voz ya está desactivada", "respuesta")
             return
         
         else:
