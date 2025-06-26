@@ -8,6 +8,12 @@ import time                 # Para funciones relacionadas con tiempo
 import json                 # Para leer/guardar configuraciones
 import sys                  # Para acceder a variables del sistema
 import pyttsx3              # Para síntesis de voz (TTS)
+import threading            # Para manejo de hilos
+import random               # Para generar números aleatorios
+try:
+    import numpy as np      # Para operaciones numéricas (opcional)
+except ImportError:
+    np = None
 
 # Importación de componentes PyQt5 para la interfaz gráfica
 from PyQt5.QtWidgets import (
@@ -95,13 +101,8 @@ class AudioLevelThread(QThread):
         super().__init__(parent)
         self.running = False  # Bandera para controlar si el hilo está ejecutándose
         
-        # Intentar usar numpy para mejor rendimiento o usar biblioteca estándar si no está disponible
-        try:
-            import numpy as np
-            self.np = np
-            self.has_numpy = True
-        except ImportError:
-            self.has_numpy = False
+        # Verificar si numpy está disponible
+        self.has_numpy = np is not None
     
     def run(self):
         """Método que se ejecuta cuando se inicia el hilo"""
@@ -112,12 +113,11 @@ class AudioLevelThread(QThread):
             if self.has_numpy:
                 # Usar numpy para generar valores aleatorios más eficientemente
                 while self.running:
-                    level = self.np.random.random() * 0.5  # Valor entre 0 y 0.5
+                    level = np.random.random() * 0.5  # Valor entre 0 y 0.5
                     self.level_updated.emit(level)       # Emitir el nivel para actualizar la interfaz
                     time.sleep(0.1)                      # Esperar 100ms antes de actualizar de nuevo
             else:
                 # Alternativa usando la biblioteca estándar si numpy no está disponible
-                import random
                 while self.running:
                     level = random.random() * 0.5
                     self.level_updated.emit(level)
@@ -139,22 +139,67 @@ class SpeechRecognitionThread(QThread):
     command_recognized = pyqtSignal(str)  # Se emite cuando se reconoce un comando
     status_message = pyqtSignal(str)      # Se emite para mostrar mensajes de estado
     
-    def __init__(self, energy_threshold=4000, parent=None):
+    def __init__(self, energy_threshold=3000, parent=None):
         super().__init__(parent)
         self.running = False
         
-        # Configurar reconocedor de voz
+        # Configurar reconocedor de voz con parámetros optimizados
         self.recognizer = sr.Recognizer()
         self.recognizer.energy_threshold = energy_threshold  # Sensibilidad del micrófono
         self.recognizer.dynamic_energy_threshold = True      # Ajuste automático de sensibilidad
-        self.pause_processing = False                        # Bandera para pausar procesamiento
+        self.recognizer.dynamic_energy_adjustment_damping = 0.15  # Ajuste más suave
+        self.recognizer.dynamic_energy_ratio = 1.5           # Ratio para ajuste dinámico
+        self.recognizer.pause_threshold = 0.8                # Pausa entre palabras (segundos)
+        self.recognizer.operation_timeout = None             # Sin timeout por defecto
+        self.recognizer.phrase_threshold = 0.3               # Tiempo mínimo para considerar una frase
+        self.recognizer.non_speaking_duration = 0.8          # Duración de silencio para completar frase
         
-        # Intentar cargar la lista de micrófonos para mejorar rendimiento
-        self.microphone_list = None
+        self.pause_processing = False                        # Bandera para pausar procesamiento
+        self.last_adjustment_time = 0                        # Control de ajustes de ruido ambiente
+        self.consecutive_errors = 0                          # Contador de errores consecutivos
+        self.max_consecutive_errors = 5                      # Máximo de errores antes de reset
+        
+        # Configurar micrófono con el mejor dispositivo disponible
+        self.microphone = None
+        self.setup_microphone()
+        
+        # Lista de frases alternativas para mejor reconocimiento
+        self.alternate_phrases = {
+            'ejecutar': ['ejecutar', 'correr', 'lanzar', 'iniciar'],
+            'listar': ['listar', 'mostrar', 'ver', 'enseñar'],
+            'crear': ['crear', 'hacer', 'generar', 'nuevo'],
+            'eliminar': ['eliminar', 'borrar', 'quitar', 'suprimir'],
+            'abrir': ['abrir', 'ejecutar', 'lanzar'],
+            'salir': ['salir', 'cerrar', 'terminar', 'finalizar', 'adiós', 'adios']
+        }
+    
+    def setup_microphone(self):
+        """Configura el micrófono con el mejor dispositivo disponible"""
         try:
-            self.microphone_list = sr.Microphone.list_microphone_names()
-        except:
-            pass
+            microphone_list = sr.Microphone.list_microphone_names()
+            if microphone_list:
+                # Buscar micrófonos con nombres que indiquen mejor calidad
+                preferred_keywords = ['usb', 'headset', 'gaming', 'professional', 'studio']
+                selected_index = None
+                
+                for i, mic_name in enumerate(microphone_list):
+                    mic_lower = mic_name.lower()
+                    if any(keyword in mic_lower for keyword in preferred_keywords):
+                        selected_index = i
+                        break
+                
+                # Si no se encuentra un micrófono preferido, usar el predeterminado
+                if selected_index is not None:
+                    self.microphone = sr.Microphone(device_index=selected_index)
+                    print(f"Micrófono seleccionado: {microphone_list[selected_index]}")
+                else:
+                    self.microphone = sr.Microphone()
+                    print("Usando micrófono predeterminado")
+            else:
+                self.microphone = sr.Microphone()
+        except Exception as e:
+            print(f"Error al configurar micrófono: {e}")
+            self.microphone = sr.Microphone()
     
     def set_energy_threshold(self, value):
         """Actualiza el umbral de energía (sensibilidad) del reconocedor"""
@@ -167,11 +212,86 @@ class SpeechRecognitionThread(QThread):
     def resume(self):
         """Reanuda el procesamiento de comandos"""
         self.pause_processing = False
+        self.consecutive_errors = 0  # Reset contador de errores al reanudar
+    
+    def reset_recognizer(self):
+        """Reinicia el reconocedor en caso de muchos errores"""
+        try:
+            # Reconfigurar el reconocedor con valores seguros
+            self.recognizer = sr.Recognizer()
+            self.recognizer.energy_threshold = 3000
+            self.recognizer.dynamic_energy_threshold = True
+            self.recognizer.dynamic_energy_adjustment_damping = 0.15
+            self.recognizer.dynamic_energy_ratio = 1.5
+            self.recognizer.pause_threshold = 0.8
+            self.recognizer.phrase_threshold = 0.3
+            self.recognizer.non_speaking_duration = 0.8
+            self.consecutive_errors = 0
+            self.status_message.emit("Reconocedor reiniciado")
+        except Exception as e:
+            self.status_message.emit(f"Error al reiniciar reconocedor: {e}")
+    
+    def process_recognized_text(self, texto):
+        """Procesa y mejora el texto reconocido"""
+        texto_limpio = texto.lower().strip()
+        
+        # Reemplazar palabras mal reconocidas con alternativas comunes
+        replacements = {
+            'ejecuta': 'ejecutar',
+            'ejecutate': 'ejecutar',
+            'lista': 'listar',
+            'listado': 'listar',
+            'muestra': 'mostrar',
+            'muestrame': 'mostrar',
+            'crea': 'crear',
+            'elimina': 'eliminar',
+            'borra': 'borrar',
+            'abre': 'abrir',
+            'sal': 'salir',
+            'sierra': 'cerrar',
+            'correr': 'ejecutar',
+            'enseñar': 'mostrar',
+            'enseña': 'mostrar',
+            'hora actual': 'hora',
+            'que hora es': 'qué hora es',
+            'fecha actual': 'fecha',
+            'que dia es': 'qué día es',
+            'que fecha es': 'qué fecha es',
+            'informacion': 'información',
+            'informacion del sistema': 'información del sistema',
+            'carpetas': 'carpeta',
+            'archivos': 'archivo',
+            'directorio actual': 'directorio actual',
+            'donde estoy': 'dónde estoy',
+            'navegar': 'abrir navegador',
+            'browser': 'navegador',
+            'internet': 'abrir navegador',
+            'web': 'abrir navegador',
+            'busca': 'buscar',
+            'buscame': 'buscar',
+            'procesos': 'mostrar procesos',
+            'ram': 'memoria',
+            'memoria ram': 'memoria',
+            'espacio': 'uso de disco',
+            'red': 'conexiones de red',
+            'conexión': 'conexiones de red',
+            'ayudar': 'ayuda',
+            'auxilio': 'ayuda',
+            'comandos disponibles': 'comandos',
+            'que puedo hacer': 'qué puedo hacer',
+            'que comandos': 'comandos'
+        }
+        
+        for wrong, correct in replacements.items():
+            texto_limpio = texto_limpio.replace(wrong, correct)
+        
+        return texto_limpio
     
     def run(self):
         """Método principal que ejecuta el reconocimiento de voz"""
         self.running = True
-        error_count = 0  # Contador para seguimiento de errores consecutivos
+        self.consecutive_errors = 0
+        calibration_needed = True
         
         while self.running:
             # Si está pausado, esperar un momento y continuar
@@ -180,54 +300,126 @@ class SpeechRecognitionThread(QThread):
                 continue
                 
             try:
-                # Iniciar micrófono y escuchar
-                with sr.Microphone() as source:
+                # Usar el micrófono configurado
+                with self.microphone as source:
+                    self.status_message.emit("Preparando micrófono...")
+                    
+                    # Calibración inicial o después de errores
+                    current_time = time.time()
+                    if (calibration_needed or 
+                        current_time - self.last_adjustment_time > 30 or 
+                        self.consecutive_errors >= 3):
+                        
+                        self.status_message.emit("Calibrando micrófono...")
+                        try:
+                            # Ajuste más agresivo para ruido ambiente
+                            self.recognizer.adjust_for_ambient_noise(source, duration=1.5)
+                            self.last_adjustment_time = current_time
+                            calibration_needed = False
+                            self.status_message.emit("Calibración completada")
+                        except Exception as e:
+                            self.status_message.emit(f"Error en calibración: {e}")
+                    
                     self.status_message.emit("Escuchando...")
                     
-                    # Ajustar para ruido ambiente (solo ocasionalmente para mejorar rendimiento)
-                    if error_count == 0 or error_count % 5 == 0:
-                        self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                    
                     try:
-                        # Escuchar audio con límite de tiempo
-                        audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=5)
+                        # Configurar timeouts más robustos
+                        audio = self.recognizer.listen(
+                            source, 
+                            timeout=3,          # Timeout para comenzar a hablar (reducido)
+                            phrase_time_limit=8  # Tiempo máximo para una frase (aumentado)
+                        )
                         
                         # Verificar si se debe pausar el procesamiento
-                        if self.pause_processing:
+                        if self.pause_processing or not self.running:
                             continue
                             
-                        # Reconocer el texto del audio
+                        # Reconocer el texto del audio con timeout
                         self.status_message.emit("Procesando...")
-                        texto = self.recognizer.recognize_google(audio, language="es-ES")
                         
-                        # Verificar nuevamente antes de emitir el comando
-                        if not self.pause_processing:
-                            self.command_recognized.emit(texto.lower())
+                        # Usar threading para evitar bloqueos en el reconocimiento
+                        import threading
+                        recognition_result = [None]
+                        recognition_error = [None]
+                        
+                        def recognize_audio():
+                            try:
+                                texto = self.recognizer.recognize_google(
+                                    audio, 
+                                    language="es-ES",
+                                    show_all=False  # Solo el mejor resultado
+                                )
+                                recognition_result[0] = texto
+                            except Exception as e:
+                                recognition_error[0] = e
+                        
+                        # Ejecutar reconocimiento en hilo separado con timeout
+                        recognition_thread = threading.Thread(target=recognize_audio)
+                        recognition_thread.daemon = True
+                        recognition_thread.start()
+                        recognition_thread.join(timeout=10)  # Timeout de 10 segundos para reconocimiento
+                        
+                        if recognition_thread.is_alive():
+                            # Si el hilo sigue vivo, hay un timeout
+                            self.status_message.emit("Timeout en reconocimiento")
+                            self.consecutive_errors += 1
+                            continue
+                        
+                        if recognition_error[0]:
+                            raise recognition_error[0]
+                        
+                        if recognition_result[0]:
+                            # Procesar y limpiar el texto reconocido
+                            texto_procesado = self.process_recognized_text(recognition_result[0])
                             
-                        error_count = 0  # Reiniciar contador de errores tras éxito
-                        
+                            # Verificar nuevamente antes de emitir el comando
+                            if not self.pause_processing and self.running and texto_procesado.strip():
+                                self.command_recognized.emit(texto_procesado)
+                                self.consecutive_errors = 0  # Reset contador tras éxito
+                                self.status_message.emit("Comando reconocido")
+                            
                     except sr.WaitTimeoutError:
-                        # Timeout normal, no es un error
-                        pass
+                        # Timeout normal al esperar audio - no es un error
+                        self.status_message.emit("Esperando comando...")
+                        time.sleep(0.1)
+                        
                     except sr.UnknownValueError:
                         # No se pudo entender lo que se dijo
-                        self.status_message.emit("No se entendió el comando")
-                        error_count += 1
+                        self.consecutive_errors += 1
+                        if self.consecutive_errors <= 2:
+                            self.status_message.emit("No se entendió - intenta de nuevo")
+                        else:
+                            self.status_message.emit("Habla más claro y despacio")
+                        time.sleep(0.5)
+                        
                     except sr.RequestError as e:
                         # Error de conexión al servicio de reconocimiento
-                        self.status_message.emit(f"Error de servicio: {e}")
-                        error_count += 1
-                        time.sleep(1)  # Esperar un poco más si hay error de red
+                        self.consecutive_errors += 1
+                        self.status_message.emit(f"Error de conexión: Verifique internet")
+                        time.sleep(2)  # Esperar más tiempo en errores de red
+                        
+                    except Exception as e:
+                        # Otros errores durante el reconocimiento
+                        self.consecutive_errors += 1
+                        self.status_message.emit(f"Error en reconocimiento: {str(e)[:50]}")
+                        time.sleep(1)
+                        
             except Exception as e:
-                # Manejo de otros errores
-                self.status_message.emit(f"Error: {str(e)}")
-                error_count += 1
+                # Errores al acceder al micrófono
+                self.consecutive_errors += 1
+                self.status_message.emit(f"Error de micrófono: {str(e)[:50]}")
+                time.sleep(1)
+            
+            # Reiniciar reconocedor si hay demasiados errores consecutivos
+            if self.consecutive_errors >= self.max_consecutive_errors:
+                self.status_message.emit("Demasiados errores - reiniciando...")
+                self.reset_recognizer()
+                calibration_needed = True
+                time.sleep(2)
                 
-                # Aumentar tiempo de espera si hay muchos errores seguidos
-                if error_count > 3:
-                    time.sleep(2)
-                else:
-                    time.sleep(0.1) 
+            # Pequeña pausa entre ciclos para no sobrecargar el sistema
+            if self.running:
+                time.sleep(0.1) 
     
     def stop(self):
         """Detiene el hilo de reconocimiento de voz"""
@@ -245,9 +437,15 @@ class ConsoleTextEdit(QTextEdit):
         
         self.buffer = []              
         self.max_buffer = 200         
-        self.buffer_timer = QTimer() 
-        self.buffer_timer.timeout.connect(self.flush_buffer)
-        self.buffer_timer.start(100)  
+        # No inicializar el timer aquí, se hará desde el hilo principal
+        self.buffer_timer = None
+        
+    def setup_timer(self):
+        """Configura el timer desde el hilo principal"""
+        if self.buffer_timer is None:
+            self.buffer_timer = QTimer(self)
+            self.buffer_timer.timeout.connect(self.flush_buffer)
+            self.buffer_timer.start(100)  
             
     def setup_ui(self):
         """Configura la apariencia de la consola"""
@@ -260,7 +458,13 @@ class ConsoleTextEdit(QTextEdit):
     def append_message(self, message, message_type="normal"):
         """Añade un mensaje al buffer para mostrarlo en la consola"""
         self.buffer.append((message, message_type))
-        if len(self.buffer) >= 10: 
+        
+        # Asegurar que el timer esté configurado
+        if self.buffer_timer is None:
+            self.setup_timer()
+            
+        # Forzar flush si hay muchos mensajes o si no hay timer
+        if len(self.buffer) >= 10 or self.buffer_timer is None:
             self.flush_buffer()
     
     def flush_buffer(self):
@@ -268,91 +472,100 @@ class ConsoleTextEdit(QTextEdit):
         if not self.buffer:
             return
             
-        self.setUpdatesEnabled(False)
-        
-        is_black_and_white_theme = (hasattr(self.parent_window, 'current_theme') and 
-                                    self.parent_window.current_theme == "black_and_white")
+        try:
+            self.setUpdatesEnabled(False)
+            
+            is_black_and_white_theme = (hasattr(self.parent_window, 'current_theme') and 
+                                        self.parent_window.current_theme == "black_and_white")
 
-        # Colores base (para tema claro o si no es B&W)
-        text_color = "#646566" # Default for light theme console
-        prompt_color = "#5d6972"
-        command_text_color = "#98c379"
-        respuesta_color = "#98c379"
-        error_color = "#e06c75"
-        sistema_color = "#c678dd"
-        timestamp_color = "#5c6370" # Un gris para el timestamp en tema claro
-        
-        if is_black_and_white_theme:
-            # Todo el texto es blanco en el tema negro y blanco
-            text_color = "#FFFFFF"
-            prompt_color = "#FFFFFF"
-            command_text_color = "#FFFFFF"
-            respuesta_color = "#FFFFFF"
-            error_color = "#FFFFFF"
-            sistema_color = "#FFFFFF"
-            timestamp_color = "#FFFFFF" # Timestamp también blanco
+            # Colores base (para tema claro o si no es B&W)
+            text_color = "#646566" # Default for light theme console
+            prompt_color = "#5d6972"
+            command_text_color = "#98c379"
+            respuesta_color = "#98c379"
+            error_color = "#e06c75"
+            sistema_color = "#c678dd"
+            timestamp_color = "#5c6370" # Un gris para el timestamp en tema claro
+            
+            if is_black_and_white_theme:
+                # Todo el texto es blanco en el tema negro y blanco
+                text_color = "#FFFFFF"
+                prompt_color = "#FFFFFF"
+                command_text_color = "#FFFFFF"
+                respuesta_color = "#FFFFFF"
+                error_color = "#FFFFFF"
+                sistema_color = "#FFFFFF"
+                timestamp_color = "#FFFFFF" # Timestamp también blanco
 
-        colors = {
-            "prompt": prompt_color,
-            "comando_text": command_text_color,
-            "respuesta": respuesta_color,
-            "error": error_color,
-            "sistema": sistema_color,
-            "normal": text_color, 
-            "timestamp": timestamp_color
-        }
-        
-        # Emojis (se mantienen)
-        emojis = {
-            "comando": "🗣️", "respuesta": "✔️", "error": "❌", "sistema": "⚙️", "normal": ""
-        }
-        
-        prompt_text = "PS>" # Se mantiene el prompt visualmente
-        
-        for message, message_type in self.buffer:
-            current_timestamp = datetime.datetime.now().strftime("[%H:%M:%S] ")
-            self.setTextColor(QColor(colors["timestamp"]))
-            self.insertPlainText(current_timestamp)
+            colors = {
+                "prompt": prompt_color,
+                "comando_text": command_text_color,
+                "respuesta": respuesta_color,
+                "error": error_color,
+                "sistema": sistema_color,
+                "normal": text_color, 
+                "timestamp": timestamp_color
+            }
+            
+            # Emojis (se mantienen)
+            emojis = {
+                "comando": "🗣️", "respuesta": "✔️", "error": "❌", "sistema": "⚙️", "normal": ""
+            }
+            
+            prompt_text = "PS>" # Se mantiene el prompt visualmente
+            
+            for message, message_type in self.buffer:
+                try:
+                    current_timestamp = datetime.datetime.now().strftime("[%H:%M:%S] ")
+                    self.setTextColor(QColor(colors["timestamp"]))
+                    self.insertPlainText(current_timestamp)
 
-            emoji = emojis.get(message_type, "")
-            if emoji:
-                # Los emojis no tienen color de texto, usan el de la fuente
-                self.insertPlainText(f"{emoji} ") 
+                    emoji = emojis.get(message_type, "")
+                    if emoji:
+                        # Los emojis no tienen color de texto, usan el de la fuente
+                        self.insertPlainText(f"{emoji} ") 
 
-            if message_type == "comando":
-                self.setTextColor(QColor(colors["prompt"]))
-                self.insertPlainText(f"{prompt_text} ")
-                self.setTextColor(QColor(colors["comando_text"]))
-                self.append(message) 
-            else:
-                prefix_map = {
-                    "respuesta": "Respuesta: " if not is_black_and_white_theme else "", # Sin prefijo textual en B&W
-                    "error": "Error: " if not is_black_and_white_theme else "",
-                    "sistema": "Sistema: " if not is_black_and_white_theme else "",
-                    "normal": ""
-                }
-                prefix = prefix_map.get(message_type, "")
-                
-                self.setTextColor(QColor(colors.get(message_type, colors["normal"])))
-                if prefix: # Solo añadir prefijo si no es tema B&W (para mantener limpieza)
-                    self.insertPlainText(prefix)
-                self.append(message) 
-        
-        self.buffer.clear()
-        
-        cursor = self.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.setTextCursor(cursor)
-        
-        if self.document().blockCount() > self.max_buffer:
+                    if message_type == "comando":
+                        self.setTextColor(QColor(colors["prompt"]))
+                        self.insertPlainText(f"{prompt_text} ")
+                        self.setTextColor(QColor(colors["comando_text"]))
+                        self.append(message) 
+                    else:
+                        prefix_map = {
+                            "respuesta": "Respuesta: " if not is_black_and_white_theme else "", # Sin prefijo textual en B&W
+                            "error": "Error: " if not is_black_and_white_theme else "",
+                            "sistema": "Sistema: " if not is_black_and_white_theme else "",
+                            "normal": ""
+                        }
+                        prefix = prefix_map.get(message_type, "")
+                        
+                        self.setTextColor(QColor(colors.get(message_type, colors["normal"])))
+                        if prefix: # Solo añadir prefijo si no es tema B&W (para mantener limpieza)
+                            self.insertPlainText(prefix)
+                        self.append(message)
+                except Exception as e:
+                    print(f"Error al procesar mensaje individual: {e}")
+                    continue
+            
+            self.buffer.clear()
+            
             cursor = self.textCursor()
-            cursor.movePosition(QTextCursor.Start)
-            blocks_to_remove = self.document().blockCount() - self.max_buffer
-            if blocks_to_remove > 0:
-                 cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, blocks_to_remove)
-                 cursor.removeSelectedText()
-        
-        self.setUpdatesEnabled(True)
+            cursor.movePosition(QTextCursor.End)
+            self.setTextCursor(cursor)
+            
+            if self.document().blockCount() > self.max_buffer:
+                cursor = self.textCursor()
+                cursor.movePosition(QTextCursor.Start)
+                blocks_to_remove = self.document().blockCount() - self.max_buffer
+                if blocks_to_remove > 0:
+                     cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, blocks_to_remove)
+                     cursor.removeSelectedText()
+            
+            self.setUpdatesEnabled(True)
+            
+        except Exception as e:
+            print(f"Error en flush_buffer: {e}")
+            self.buffer.clear()  # Limpiar buffer para evitar bucles infinitos
 
 
 # Clase principal que implementa la ventana del asistente de voz
@@ -429,6 +642,9 @@ class AsistenteVozQT(QMainWindow):
         self.consola = ConsoleTextEdit(parent_window=self) # Pasar referencia
         self.left_layout.addWidget(self.consola)
         
+        # Configurar el timer de la consola desde el hilo principal
+        self.consola.setup_timer()
+        
         self.command_input_layout = QHBoxLayout()
         
         self.command_input = QLineEdit()
@@ -469,16 +685,21 @@ class AsistenteVozQT(QMainWindow):
         self.audio_level.setValue(0)
         self.voice_layout.addWidget(self.audio_level)
         
-        self.sensitivity_label = QLabel("Sensibilidad: 4000")
+        self.sensitivity_label = QLabel("Sensibilidad: 3000")
         self.voice_layout.addWidget(self.sensitivity_label)
         
         self.sensitivity_slider = QSlider(Qt.Horizontal)
-        self.sensitivity_slider.setRange(1000, 8000)
-        self.sensitivity_slider.setValue(4000)
+        self.sensitivity_slider.setRange(1000, 6000)  # Rango más amplio y optimizado
+        self.sensitivity_slider.setValue(3000)        # Valor inicial más bajo para mejor sensibilidad
         self.sensitivity_slider.setTickPosition(QSlider.TicksBelow)
-        self.sensitivity_slider.setTickInterval(1000)
+        self.sensitivity_slider.setTickInterval(500)  # Intervalos más precisos
         self.sensitivity_slider.valueChanged.connect(self.update_sensitivity)
         self.voice_layout.addWidget(self.sensitivity_slider)
+        
+        # Botón para calibración manual
+        self.calibrate_button = QPushButton("Calibrar Micrófono")
+        self.calibrate_button.clicked.connect(self.calibrate_microphone_manually)
+        self.voice_layout.addWidget(self.calibrate_button)
         
         self.right_layout.addWidget(self.voice_control_frame)
         
@@ -537,7 +758,13 @@ class AsistenteVozQT(QMainWindow):
 • "conexiones de red" - Muestra conexiones activas
 • "activar voz" - Activa la síntesis de voz
 • "desactivar voz" - Desactiva la síntesis de voz
-• "salir" o "terminar" - Cierra la aplicación"""
+• "salir" o "terminar" - Cierra la aplicación
+
+CONSEJOS PARA MEJOR RECONOCIMIENTO:
+• Habla claro y despacio
+• Usa el botón "Calibrar Micrófono" si hay problemas
+• Ajusta la sensibilidad según tu entorno
+• Asegúrate de tener buena conexión a internet"""
         
         self.commands_list.setText(comandos_texto)
         self.commands_layout.addWidget(self.commands_list)
@@ -560,7 +787,8 @@ class AsistenteVozQT(QMainWindow):
         self.audio_thread = AudioLevelThread()
         self.audio_thread.level_updated.connect(self.update_audio_level)
         
-        self.speech_thread = SpeechRecognitionThread()
+        # Usar un umbral inicial más bajo para mejor sensibilidad
+        self.speech_thread = SpeechRecognitionThread(energy_threshold=3000)
         self.speech_thread.command_recognized.connect(self.on_command_recognized)
         self.speech_thread.status_message.connect(self.on_status_message)
     
@@ -819,12 +1047,18 @@ class AsistenteVozQT(QMainWindow):
     def procesar_comando_seguro(self, comando):
         """Procesa el comando de forma segura y reanuda reconocimiento al terminar"""
         try:
+            # Ejecutar en el hilo principal para evitar problemas con QTimer
             self.procesar_comando(comando)
         except Exception as e:
             self.agregar_mensaje(f"Error al procesar comando: {str(e)}", "error")
         finally:
-            if hasattr(self, 'speech_thread') and self.speech_thread.isRunning(): 
-                self.speech_thread.resume()
+            # Asegurar que siempre se reanude el reconocimiento
+            QTimer.singleShot(100, self.reanudar_reconocimiento_seguro)
+    
+    def reanudar_reconocimiento_seguro(self):
+        """Reanuda el reconocimiento de voz de forma segura"""
+        if hasattr(self, 'speech_thread') and self.speech_thread.isRunning():
+            self.speech_thread.resume()
     
     @pyqtSlot(str)
     def on_status_message(self, message):
@@ -878,6 +1112,18 @@ class AsistenteVozQT(QMainWindow):
                 json.dump(config, f)
         except Exception as e:
             print(f"Error al guardar configuración: {e}")
+    
+    def calibrate_microphone_manually(self):
+        """Calibra manualmente el micrófono"""
+        if hasattr(self, 'speech_thread') and self.speech_thread.isRunning():
+            # Forzar recalibración en el hilo de reconocimiento
+            self.speech_thread.last_adjustment_time = 0  # Forzar recalibración
+            self.agregar_mensaje("Calibrando micrófono... Mantén silencio por 2 segundos", "sistema")
+            
+            # Programar mensaje de confirmación
+            QTimer.singleShot(3000, lambda: self.agregar_mensaje("Calibración completada", "sistema"))
+        else:
+            self.agregar_mensaje("Inicia la escucha primero para calibrar", "error")
     
     def update_sensitivity(self, value):
         """Actualiza el valor de sensibilidad del micrófono"""
@@ -969,34 +1215,38 @@ class AsistenteVozQT(QMainWindow):
         """Genera una respuesta breve para la síntesis de voz"""
         mensaje_original = mensaje.lower()
         
-        # Respuestas para comandos específicos
+        # Solo responder con una confirmación del comando, sin leer la respuesta completa
         if "directorio" in mensaje_original:
             return "Directorio actualizado."
         elif "archivo creado" in mensaje_original:
-            return "Archivo creado correctamente."
+            return "Archivo creado."
         elif "archivo eliminado" in mensaje_original:
-            return "Archivo eliminado correctamente."
+            return "Archivo eliminado."
         elif "carpeta creada" in mensaje_original:
-            return "Carpeta creada correctamente."
+            return "Carpeta creada."
         elif "son las" in mensaje_original:
-            # Para comandos de hora, mantener el mensaje original
-            return mensaje
+            return "Hora confirmada."
         elif "hoy es" in mensaje_original:
-            # Para comandos de fecha, mantener el mensaje original
-            return mensaje
+            return "Fecha confirmada."
         elif "abriendo navegador" in mensaje_original:
-            return "Abriendo navegador web."
+            return "Abriendo navegador."
         elif "buscando" in mensaje_original:
-            return "Búsqueda iniciada en Google."
+            return "Búsqueda iniciada."
+        elif "listando" in mensaje_original or "mostrando archivos" in mensaje_original:
+            return "Archivos listados."
+        elif "procesos" in mensaje_original:
+            return "Procesos mostrados."
+        elif "memoria" in mensaje_original:
+            return "Uso de memoria consultado."
+        elif "disco" in mensaje_original:
+            return "Espacio en disco consultado."
+        elif "conexiones" in mensaje_original:
+            return "Conexiones de red mostradas."
+        elif "información del sistema" in mensaje_original:
+            return "Información mostrada."
         
-        # Respuestas genéricas según el contenido del mensaje
-        elif len(mensaje) > 500:  # Mensaje muy largo
-            return "Comando ejecutado. La respuesta es extensa."
-        elif mensaje.strip().count("\n") > 5:  # Mensaje con muchas líneas
-            return "Comando ejecutado. Se muestran los resultados en pantalla."
-        else:
-            # Mensaje general para otros casos
-            return "Comando ejecutado correctamente."
+        # Respuesta genérica para cualquier otro comando
+        return "Comando confirmado."
     
     def ejecutar_comando_terminal(self, comando_str):
         """Ejecuta un comando en la terminal del sistema y devuelve (mensaje, tipo_mensaje)"""
@@ -1035,8 +1285,14 @@ class AsistenteVozQT(QMainWindow):
 
     def procesar_comando(self, texto):
         """Procesa el comando de voz y ejecuta la acción correspondiente"""
+        # Limpiar y normalizar el texto de entrada
+        texto = texto.strip().lower()
+        
+        # Agregar debug para ver qué comando se está procesando
+        print(f"DEBUG: Procesando comando: '{texto}'")
+        
         # Salir de la aplicación
-        if "salir" in texto or "terminar" in texto or "adiós" in texto or "adios" in texto:
+        if any(palabra in texto for palabra in ["salir", "terminar", "adiós", "adios", "cerrar", "exit"]):
             self.agregar_mensaje("Cerrando asistente...", "sistema")
             if self.escuchando:
                 self.detener_escucha()
@@ -1045,52 +1301,90 @@ class AsistenteVozQT(QMainWindow):
             return
         
         # Establecer ruta de trabajo
-        elif any(frase in texto for frase in ["establecer ruta a", "cambiar ruta a", "cambiar ruta de trabajo a"]):
-            palabras_clave = ["establecer ruta a", "cambiar ruta a", "cambiar ruta de trabajo a"]
+        elif any(frase in texto for frase in ["establecer ruta a", "cambiar ruta a", "cambiar ruta de trabajo a", "ruta a"]):
+            nueva_ruta = None
+            palabras_clave = ["establecer ruta a", "cambiar ruta a", "cambiar ruta de trabajo a", "ruta a"]
             for palabra in palabras_clave:
                 if palabra in texto:
-                    nueva_ruta = texto.split(palabra)[1].strip()
-                    if nueva_ruta:
-                        self.cambiar_ruta_trabajo(nueva_ruta)
-                    else:
-                        self.agregar_mensaje("No se especificó una ruta válida.", "error")
-                    return
-            self.agregar_mensaje("No se especificó una ruta válida.", "error")
+                    nueva_ruta = texto.split(palabra, 1)[1].strip()
+                    break
+            
+            if nueva_ruta:
+                self.cambiar_ruta_trabajo(nueva_ruta)
+            else:
+                self.agregar_mensaje("No se especificó una ruta válida.", "error")
             return
             
         # Usar ruta predeterminada (carpeta del usuario)
-        elif "usar ruta predeterminada" in texto or "ruta por defecto" in texto:
+        elif any(frase in texto for frase in ["usar ruta predeterminada", "ruta por defecto", "ruta predeterminada", "ruta home"]):
             ruta_predeterminada = os.path.expanduser("~")
             self.cambiar_ruta_trabajo(ruta_predeterminada)
             return
         
-        # Crear carpeta
-        elif "crear carpeta" in texto or "nueva carpeta" in texto:
-            palabras_clave = ["crear carpeta", "nueva carpeta"]
+        # Cambiar de directorio
+        elif any(frase in texto for frase in ["cambiar directorio a", "ir a directorio", "cambiar a", "ir a"]):
+            directorio_str = None
+            palabras_clave = ["cambiar directorio a", "ir a directorio", "cambiar a", "ir a"]
             for palabra in palabras_clave:
                 if palabra in texto:
-                    nombre_carpeta = texto.split(palabra)[1].strip()
-                    if nombre_carpeta:
-                        try:
-                            ruta_completa = os.path.join(self.ruta_trabajo, nombre_carpeta)
-                            os.makedirs(ruta_completa, exist_ok=True)
-                            self.agregar_mensaje(f"Carpeta creada: {ruta_completa}", "respuesta")
-                        except Exception as e:
-                            self.agregar_mensaje(f"Error al crear carpeta: {str(e)}", "error")
-                    else:
-                        self.agregar_mensaje("No se especificó nombre para la carpeta.", "error")
-                    return
+                    directorio_str = texto.split(palabra, 1)[1].strip()
+                    break
+            
+            if directorio_str:
+                directorio_destino = os.path.join(os.getcwd(), directorio_str) if not os.path.isabs(directorio_str) else directorio_str
+                try:
+                    os.chdir(directorio_destino) 
+                    self.ruta_trabajo = os.getcwd() 
+                    self.current_path_label.setText(self.ruta_trabajo)
+                    self.on_status_message(self.status_bar.text().split("| Estado:")[-1].strip())
+                    self.agregar_mensaje(f"Directorio cambiado a: {os.getcwd()}", "respuesta")
+                except FileNotFoundError:
+                    self.agregar_mensaje(f"Directorio '{directorio_destino}' no encontrado.", "error")
+                except Exception as e:
+                    self.agregar_mensaje(f"Error al cambiar directorio: {str(e)}", "error")
+            else:
+                self.agregar_mensaje("No se especificó un directorio.", "error")
+            return
+        
+        # Crear carpeta
+        elif any(frase in texto for frase in ["crear carpeta", "nueva carpeta", "hacer carpeta", "crea carpeta"]):
+            palabras_clave = ["crear carpeta", "nueva carpeta", "hacer carpeta", "crea carpeta"]
+            nombre_carpeta = None
+            for palabra in palabras_clave:
+                if palabra in texto:
+                    nombre_carpeta = texto.split(palabra, 1)[1].strip()
+                    break
+            
+            if nombre_carpeta:
+                try:
+                    ruta_completa = os.path.join(self.ruta_trabajo, nombre_carpeta)
+                    os.makedirs(ruta_completa, exist_ok=True)
+                    self.agregar_mensaje(f"Carpeta creada: {ruta_completa}", "respuesta")
+                except Exception as e:
+                    self.agregar_mensaje(f"Error al crear carpeta: {str(e)}", "error")
+            else:
+                self.agregar_mensaje("No se especificó nombre para la carpeta.", "error")
+            return
         
         # Ejecutar comando directo de terminal
-        elif texto.startswith(self.prefijo_comando):
-            comando_terminal_str = texto[len(self.prefijo_comando):].strip()
-            self.agregar_mensaje(f"Ejecutando: {comando_terminal_str}", "sistema")
-            resultado, tipo_resultado = self.ejecutar_comando_terminal(comando_terminal_str)
-            self.agregar_mensaje(resultado, tipo_resultado)
+        elif any(prefijo in texto for prefijo in ["ejecutar", "correr", "lanzar", "ejecuta"]):
+            # Encontrar el prefijo usado y extraer el comando
+            comando_terminal_str = None
+            for prefijo in ["ejecutar", "correr", "lanzar", "ejecuta"]:
+                if prefijo in texto:
+                    comando_terminal_str = texto.split(prefijo, 1)[1].strip()
+                    break
+            
+            if comando_terminal_str:
+                self.agregar_mensaje(f"Ejecutando: {comando_terminal_str}", "sistema")
+                resultado, tipo_resultado = self.ejecutar_comando_terminal(comando_terminal_str)
+                self.agregar_mensaje(resultado, tipo_resultado)
+            else:
+                self.agregar_mensaje("No se especificó comando a ejecutar.", "error")
             return
         
         # Listar archivos y directorios
-        elif "listar" in texto or "mostrar archivos" in texto or "mostrar directorio" in texto:
+        elif any(palabra in texto for palabra in ["listar", "mostrar archivos", "mostrar directorio", "lista", "ls", "dir", "ver archivos"]):
             comando_ls = "dir" if self.sistema_operativo == "Windows" else "ls -la"
             resultado, tipo_resultado = self.ejecutar_comando_terminal(comando_ls)
             self.agregar_mensaje(resultado, tipo_resultado)
@@ -1117,79 +1411,23 @@ class AsistenteVozQT(QMainWindow):
             return
         
         # Mostrar directorio actual
-        elif "directorio actual" in texto or "dónde estoy" in texto:
+        elif any(frase in texto for frase in ["directorio actual", "dónde estoy", "donde estoy", "ruta actual", "directorio"]):
             self.agregar_mensaje(f"Directorio CWD: {os.getcwd()}", "respuesta")
             self.agregar_mensaje(f"Ruta de trabajo: {self.ruta_trabajo}", "respuesta")
             return
-            
-        # Apagar sistema
-        elif "apagar sistema" in texto or "apagar computadora" in texto:
-            QTimer.singleShot(0, lambda: self.confirmar_apagado(texto))
-            return
-                
-        # Cancelar apagado
-        elif "cancelar apagado" in texto:
-            comando_cancelar = "shutdown /a" if self.sistema_operativo == "Windows" else "shutdown -c"
-            resultado, tipo_resultado = self.ejecutar_comando_terminal(comando_cancelar)
-            if tipo_resultado != "error":
-                 self.agregar_mensaje("Cancelación de apagado solicitada.", "respuesta")
-            else:
-                 self.agregar_mensaje(f"No se pudo cancelar apagado: {resultado}", "error")
-            return
-            
-        # Crear archivo
-        elif "crear archivo" in texto:
-            partes = texto.split("crear archivo")
-            if len(partes) > 1:
-                nombre_archivo = partes[1].strip()
-                if nombre_archivo:
-                    try:
-                        ruta_completa = os.path.join(self.ruta_trabajo, nombre_archivo)
-                        with open(ruta_completa, 'w') as f: pass
-                        self.agregar_mensaje(f"Archivo creado: {ruta_completa}", "respuesta")
-                    except Exception as e:
-                        self.agregar_mensaje(f"Error al crear archivo: {str(e)}", "error")
-                else:
-                    self.agregar_mensaje("No se especificó nombre de archivo.", "error")
-            else:
-                self.agregar_mensaje("No se especificó nombre de archivo.", "error")
-            return
-                
-        # Eliminar archivo
-        elif "eliminar archivo" in texto or "borrar archivo" in texto:
-            for palabra_clave_del in ["eliminar archivo", "borrar archivo"]:
-                if palabra_clave_del in texto:
-                    partes = texto.split(palabra_clave_del)
-                    if len(partes) > 1:
-                        nombre_archivo_del = partes[1].strip()
-                        if nombre_archivo_del:
-                            ruta_completa_del = os.path.join(self.ruta_trabajo, nombre_archivo_del) if not os.path.isabs(nombre_archivo_del) else nombre_archivo_del
-                            if not os.path.exists(ruta_completa_del):
-                                self.agregar_mensaje(f"Error: Archivo {ruta_completa_del} no existe.", "error")
-                                return
-                            QTimer.singleShot(0, lambda rc=ruta_completa_del: self.confirmar_eliminacion(rc))
-                            return
-            self.agregar_mensaje("No se especificó archivo a eliminar.", "error")
-            return
-            
-        # Mostrar información del sistema
-        elif "información del sistema" in texto or "info sistema" in texto:
-            info = f"OS: {platform.system()} {platform.release()}\nVer: {platform.version()}\nArch: {platform.machine()}\nProc: {platform.processor()}\nHost: {platform.node()}"
-            self.agregar_mensaje(info, "respuesta")
-            return
-            
+        
         # Mostrar hora actual
-        elif "hora" in texto or "qué hora es" in texto:
+        elif any(frase in texto for frase in ["hora", "qué hora es", "que hora es", "hora actual", "tiempo"]):
             self.agregar_mensaje(f"Son las {datetime.datetime.now().strftime('%H:%M:%S')}", "respuesta")
             return
             
         # Mostrar fecha actual
-        elif "fecha" in texto or "qué día es" in texto or "qué fecha es" in texto:
+        elif any(frase in texto for frase in ["fecha", "qué día es", "que dia es", "qué fecha es", "fecha actual", "hoy"]):
             self.agregar_mensaje(f"Hoy es {datetime.datetime.now().strftime('%d/%m/%Y')}", "respuesta")
             return
             
         # Abrir navegador web
-        elif "abrir navegador" in texto or "abrir web" in texto:
+        elif any(frase in texto for frase in ["abrir navegador", "abrir web", "navegador", "abrir browser", "internet"]):
             try:
                 webbrowser.open("https://www.google.com")
                 self.agregar_mensaje("Abriendo navegador...", "respuesta")
@@ -1198,8 +1436,8 @@ class AsistenteVozQT(QMainWindow):
             return
             
         # Buscar en Google
-        elif "buscar" in texto:
-            busqueda = texto.replace("buscar", "").strip()
+        elif "buscar" in texto or "busca" in texto:
+            busqueda = texto.replace("buscar", "").replace("busca", "").strip()
             if busqueda:
                 try:
                     url = f"https://www.google.com/search?q={busqueda.replace(' ', '+')}"
@@ -1210,37 +1448,64 @@ class AsistenteVozQT(QMainWindow):
             else:
                 self.agregar_mensaje("No se especificó qué buscar.", "error")
             return
+            
+        # Crear archivo
+        elif any(frase in texto for frase in ["crear archivo", "nuevo archivo", "hacer archivo", "crea archivo"]):
+            palabras_clave = ["crear archivo", "nuevo archivo", "hacer archivo", "crea archivo"]
+            nombre_archivo = None
+            for palabra in palabras_clave:
+                if palabra in texto:
+                    nombre_archivo = texto.split(palabra, 1)[1].strip()
+                    break
+            
+            if nombre_archivo:
+                try:
+                    ruta_completa = os.path.join(self.ruta_trabajo, nombre_archivo)
+                    with open(ruta_completa, 'w') as f: 
+                        pass
+                    self.agregar_mensaje(f"Archivo creado: {ruta_completa}", "respuesta")
+                except Exception as e:
+                    self.agregar_mensaje(f"Error al crear archivo: {str(e)}", "error")
+            else:
+                self.agregar_mensaje("No se especificó nombre de archivo.", "error")
+            return
+                
+        # Mostrar información del sistema
+        elif any(frase in texto for frase in ["información del sistema", "info sistema", "información", "sistema", "información de sistema"]):
+            info = f"OS: {platform.system()} {platform.release()}\nVer: {platform.version()}\nArch: {platform.machine()}\nProc: {platform.processor()}\nHost: {platform.node()}"
+            self.agregar_mensaje(info, "respuesta")
+            return
                 
         # Mostrar procesos en ejecución
-        elif "mostrar procesos" in texto or "procesos en ejecución" in texto:
+        elif any(frase in texto for frase in ["mostrar procesos", "procesos en ejecución", "procesos", "ver procesos", "listar procesos"]):
             comando_proc = "tasklist" if self.sistema_operativo == "Windows" else "ps aux"
             resultado, tipo_resultado = self.ejecutar_comando_terminal(comando_proc)
             self.agregar_mensaje(resultado, tipo_resultado)
             return
                 
         # Mostrar uso de memoria
-        elif "uso de memoria" in texto or "memoria" in texto:
+        elif any(frase in texto for frase in ["uso de memoria", "memoria", "ram", "memoria ram"]):
             comando_mem = "wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /Value" if self.sistema_operativo == "Windows" else "free -h"
             resultado, tipo_resultado = self.ejecutar_comando_terminal(comando_mem)
             self.agregar_mensaje(resultado, tipo_resultado)
             return
                 
         # Mostrar uso de disco
-        elif "uso de disco" in texto or "espacio en disco" in texto:
+        elif any(frase in texto for frase in ["uso de disco", "espacio en disco", "disco", "espacio disco"]):
             comando_disk = "wmic logicaldisk get caption,freespace,size /format:table" if self.sistema_operativo == "Windows" else "df -h"
             resultado, tipo_resultado = self.ejecutar_comando_terminal(comando_disk)
             self.agregar_mensaje(resultado, tipo_resultado)
             return
                 
         # Mostrar conexiones de red
-        elif "conexiones de red" in texto or "mostrar conexiones" in texto:
+        elif any(frase in texto for frase in ["conexiones de red", "mostrar conexiones", "red", "conexiones", "conexión"]):
             comando_red = "netstat -an" if self.sistema_operativo == "Windows" else "netstat -tup"
             resultado, tipo_resultado = self.ejecutar_comando_terminal(comando_red)
             self.agregar_mensaje(resultado, tipo_resultado)
             return
             
         # Activar síntesis de voz
-        elif "activar voz" in texto or "habilitar voz" in texto or "con voz" in texto:
+        elif any(frase in texto for frase in ["activar voz", "habilitar voz", "con voz", "activa voz"]):
             if not self.tts_enabled:
                 self.tts_enabled = True
                 self.tts_button.setText("Voz: Activada")
@@ -1252,7 +1517,7 @@ class AsistenteVozQT(QMainWindow):
             return
             
         # Desactivar síntesis de voz
-        elif "desactivar voz" in texto or "deshabilitar voz" in texto or "sin voz" in texto:
+        elif any(frase in texto for frase in ["desactivar voz", "deshabilitar voz", "sin voz", "desactiva voz"]):
             if self.tts_enabled:
                 self.tts_enabled = False
                 self.tts_button.setText("Voz: Desactivada")
@@ -1261,8 +1526,23 @@ class AsistenteVozQT(QMainWindow):
                 self.agregar_mensaje("La síntesis de voz ya está desactivada", "respuesta")
             return
         
+        # Comando de ayuda
+        elif any(frase in texto for frase in ["ayuda", "help", "comandos", "qué puedo hacer", "que puedo hacer"]):
+            self.agregar_mensaje("Consulta la lista de comandos disponibles en el panel derecho.", "sistema")
+            return
+        
+        # Si no se reconoce ningún comando, dar sugerencias
         else:
+            sugerencias = [
+                "Intenta decir: 'listar', 'hora', 'fecha', 'información del sistema'",
+                "Para ejecutar comandos: 'ejecutar [comando]'",
+                "Para crear: 'crear carpeta [nombre]' o 'crear archivo [nombre]'",
+                "Para ayuda: 'comandos' o 'ayuda'"
+            ]
             self.agregar_mensaje(f"Comando no reconocido: '{texto}'.", "error")
+            self.agregar_mensaje("Sugerencias:", "sistema")
+            for sugerencia in sugerencias:
+                self.agregar_mensaje(f"• {sugerencia}", "sistema")
             return
             
     def confirmar_eliminacion(self, ruta_completa):
@@ -1315,7 +1595,7 @@ class AsistenteVozQT(QMainWindow):
                 if not self.speech_thread.wait(500): self.speech_thread.terminate() 
         except Exception as e: print(f"Error al detener speech_thread: {e}")
         
-        if hasattr(self, 'consola') and hasattr(self.consola, 'buffer_timer'):
+        if hasattr(self, 'consola') and hasattr(self.consola, 'buffer_timer') and self.consola.buffer_timer:
             self.consola.buffer_timer.stop()
         
         event.accept()
